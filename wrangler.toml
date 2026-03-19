@@ -10,7 +10,7 @@ directory = "./public"
 [[d1_databases]]
 binding = "DB"
 database_name = "straybit-ti-db"
-database_id = ""  # Fill after: npx wrangler d1 create straybit-ti-db
+database_id = ""  "ef923153-a197-4884-a7d1-1e574ab8b653"
 
 [vars]
 FRONTEND_URL = "https://straybit-threat-intel.blentkurtalani.workers.dev"
