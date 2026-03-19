@@ -1,0 +1,17 @@
+name = "straybit-threat-intel"
+main = "src/worker.js"
+compatibility_date = "2024-12-01"
+
+# Serve the frontend from /public as static assets
+[assets]
+directory = "./public"
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "straybit-ti-db"
+database_id = ""  # Fill after: npx wrangler d1 create straybit-ti-db
+
+[vars]
+FRONTEND_URL = "https://straybit-threat-intel.blentkurtalani.workers.dev"
+# Change to https://threat.straybit.io after custom domain setup
