@@ -197,6 +197,157 @@
       cves:[{id:"CVE-2024-3400",sv:"crit",cvss:10.0,pr:"Palo Alto PAN-OS",ds:"Command injection in GlobalProtect",pb:"2024-04-12"},{id:"CVE-2024-21762",sv:"crit",cvss:9.8,pr:"Fortinet FortiOS",ds:"Out-of-bound write in SSL VPN",pb:"2024-02-09"},{id:"CVE-2023-44487",sv:"high",cvss:7.5,pr:"HTTP/2 Protocol",ds:"Rapid Reset DoS attack",pb:"2023-10-10"},{id:"CVE-2024-1709",sv:"crit",cvss:10.0,pr:"ScreenConnect",ds:"Authentication bypass",pb:"2024-02-19"},{id:"CVE-2025-0282",sv:"crit",cvss:9.0,pr:"Ivanti Connect Secure",ds:"Stack buffer overflow in VPN",pb:"2025-01-08"}],
     };
 
+    // ── API Response Parsers ──
+    function parseIPResult(data) {
+      const r = data.results || {};
+      const src = data.sources || [];
+      const q = data.query;
+
+      // AbuseIPDB
+      const abuse = r.abuseipdb?.data;
+      const score = abuse?.abuseConfidenceScore || 0;
+      const rpts = abuse?.totalReports || 0;
+      const isTor = abuse?.isTor || false;
+      const cats = (abuse?.reports || []).map(r => r.categories).flat().filter((v,i,a) => a.indexOf(v) === i).slice(0,5);
+      const catNames = {1:'DNS Compromise',2:'DNS Poisoning',3:'Fraud Orders',4:'DDoS',5:'FTP Brute-Force',6:'Ping of Death',7:'Phishing',8:'Fraud VoIP',9:'Open Proxy',10:'Web Spam',11:'Email Spam',14:'Port Scan',15:'Hacking',18:'Brute-Force',19:'Bad Web Bot',20:'Exploited Host',21:'Web App Attack',22:'SSH',23:'IoT Targeted'};
+      const catLabels = cats.map(c => catNames[c] || `Cat ${c}`);
+
+      // IPinfo
+      const ipinfo = r.ipinfo || {};
+
+      // Shodan
+      const shodan = r.shodan || {};
+      const ports = shodan.ports || [];
+      const vulns = shodan.vulns || Object.keys(shodan.data?.[0]?.vulns || {}).slice(0,5) || [];
+
+      // VirusTotal
+      const vt = r.virustotal?.data?.attributes;
+      const vtMal = vt?.last_analysis_stats?.malicious || 0;
+      const vtSusp = vt?.last_analysis_stats?.suspicious || 0;
+
+      // Merge score: prefer AbuseIPDB, fallback to VT
+      const finalScore = score > 0 ? score : Math.min(vtMal * 10, 100);
+
+      return {
+        type: 'ip', q, score: finalScore, src,
+        det: {
+          host: abuse?.hostnames?.[0] || ipinfo.hostname || shodan.hostnames?.[0] || '-',
+          city: ipinfo.city || shodan.city || '-',
+          country: ipinfo.country || shodan.country_name || abuse?.countryCode || '-',
+          org: ipinfo.org || shodan.org || abuse?.isp || '-',
+          asn: ipinfo.asn || (shodan.asn ? shodan.asn : '-'),
+          tor: isTor || (abuse?.usageType||'').toLowerCase().includes('tor'),
+          proxy: abuse?.usageType === 'Commercial' || false,
+          rpts: rpts,
+          last: abuse?.lastReportedAt?.split('T')[0] || '-',
+          cats: catLabels.length > 0 ? catLabels : (vtMal > 0 ? ['Malicious (VT: '+vtMal+' engines)'] : []),
+          ports: ports.slice(0, 10),
+          vulns: vulns.slice(0, 5),
+        }
+      };
+    }
+
+    function parseDomainResult(data) {
+      const r = data.results || {};
+      const src = data.sources || [];
+      const q = data.query;
+
+      // VirusTotal
+      const vt = r.virustotal?.data?.attributes;
+      const vtStats = vt?.last_analysis_stats || {};
+      const mal = vtStats.malicious || 0;
+      const susp = vtStats.suspicious || 0;
+      const clean = vtStats.harmless || vtStats.undetected || 0;
+      const vtCats = Object.values(vt?.categories || {}).filter((v,i,a) => a.indexOf(v) === i);
+      const registrar = vt?.registrar || '-';
+      const created = vt?.creation_date ? new Date(vt.creation_date * 1000).toISOString().split('T')[0] : '-';
+      const lastDns = vt?.last_dns_records || [];
+      const aRecord = lastDns.find(d => d.type === 'A');
+
+      // OTX
+      const otx = r.otx;
+      const otxPulses = otx?.pulse_info?.count || 0;
+      const otxCats = (otx?.pulse_info?.pulses || []).map(p => p.tags || []).flat().filter((v,i,a) => a.indexOf(v) === i).slice(0,5);
+
+      // URLhaus
+      const urlhaus = r.urlhaus;
+      const urlhausStatus = urlhaus?.query_status === 'no_results' ? 'clean' : (urlhaus?.threat || 'unknown');
+      const urlhausUrls = urlhaus?.urls?.length || 0;
+
+      // Score: based on VT detections + OTX pulses
+      const score = Math.min(mal * 8 + susp * 3 + otxPulses * 2, 100);
+      const allCats = [...vtCats, ...otxCats].filter((v,i,a) => a.indexOf(v) === i);
+      if (urlhausUrls > 0) allCats.push('Malware Distribution (URLhaus)');
+
+      return {
+        type: 'domain', q, score: score > 0 ? score : 0, src,
+        det: {
+          reg: registrar,
+          created: created,
+          ip: aRecord?.value || '-',
+          ssl: vt?.last_https_certificate?.issuer?.O || '-',
+          mal: mal,
+          susp: susp,
+          clean: clean,
+          cats: allCats.length > 0 ? allCats : (mal > 0 ? ['Suspicious'] : ['No threats detected']),
+          dns: lastDns.slice(0, 6).map(d => ({t: d.type, v: d.value})),
+          otxPulses: otxPulses,
+          urlhausUrls: urlhausUrls,
+        }
+      };
+    }
+
+    function parsePhishingResult(data) {
+      const r = data.results || {};
+      const src = data.sources || [];
+
+      // Google Safe Browsing
+      const gsb = r.google_safe_browsing;
+      const gsbDetected = gsb?.matches?.length > 0;
+      const gsbCategory = gsb?.matches?.[0]?.threatType || '';
+
+      // URLhaus
+      const uh = r.urlhaus;
+      const uhDetected = uh?.query_status !== 'no_results' && uh?.query_status !== undefined;
+      const uhThreat = uh?.threat || '';
+
+      // VirusTotal
+      const vt = r.virustotal?.data?.attributes;
+      const vtStats = vt?.last_analysis_stats || {};
+      const vtMal = vtStats.malicious || 0;
+      const vtTotal = (vtStats.malicious||0)+(vtStats.suspicious||0)+(vtStats.harmless||0)+(vtStats.undetected||0);
+      const vtDetected = vtMal > 0;
+
+      const detections = [
+        {s:'Google Safe Browsing', d:gsbDetected, i:gsbDetected ? gsbCategory.replace(/_/g,' ') : 'Clean'},
+        {s:'URLhaus', d:uhDetected, i:uhDetected ? (uhThreat || 'Detected') : 'Clean'},
+        {s:'VirusTotal', d:vtDetected, i:vtDetected ? `${vtMal}/${vtTotal} engines` : 'Clean'},
+      ];
+
+      const score = Math.min((gsbDetected?40:0) + (uhDetected?30:0) + vtMal*3, 100);
+
+      const indicators = [];
+      if (gsbDetected) indicators.push({t:'dng', x:`Google: ${gsbCategory.replace(/_/g,' ')}`});
+      if (uhDetected) indicators.push({t:'dng', x:`URLhaus: ${uhThreat || 'Known malicious URL'}`});
+      if (vtMal > 5) indicators.push({t:'dng', x:`${vtMal} security engines flagged this URL`});
+      else if (vtMal > 0) indicators.push({t:'wrn', x:`${vtMal} security engine(s) flagged this URL`});
+      if (!gsbDetected && !uhDetected && vtMal === 0) indicators.push({t:'inf', x:'No threats detected across all sources'});
+
+      const lastAnalysis = vt?.last_analysis_date ? new Date(vt.last_analysis_date * 1000).toISOString().split('T')[0] : '-';
+
+      return {
+        score, 
+        det: detections,
+        ind: indicators,
+        an: {
+          age: lastAnalysis,
+          ssl: '-',
+          red: vt?.last_http_response_content_length ? 'Yes' : '-',
+          mim: vt?.title || '-',
+        }
+      };
+    }
+
     // ── Search handlers ──
     async function doSearch() {
       const input = document.getElementById('lookup-input');
@@ -213,7 +364,14 @@
       } else {
         const isIp = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(q);
         const data = await api(`/api/search/${isIp?'ip':'domain'}?q=${encodeURIComponent(q)}`);
-        if (data) { S.searchResult = { type: data.type, q: data.query, raw: data.results, src: data.sources }; await refreshUsage(); }
+        if (data) {
+          if (isIp) {
+            S.searchResult = parseIPResult(data);
+          } else {
+            S.searchResult = parseDomainResult(data);
+          }
+          await refreshUsage();
+        }
       }
       S.searchLoading = false; render();
     }
@@ -229,7 +387,7 @@
         S.phishResult = {score:94,det:[{s:'Safe Browsing',d:true,i:'Social Engineering'},{s:'PhishTank',d:true,i:'Verified'},{s:'URLhaus',d:false,i:'Clean'},{s:'VirusTotal',d:true,i:'12/72'}],ind:[{t:'dng',x:'Domain: 3 days old'},{t:'dng',x:'Mimics chase.com'},{t:'dng',x:'Multiple redirects'},{t:'wrn',x:'Free SSL cert'},{t:'wrn',x:'Hidden credential capture'}],an:{age:'3 days',ssl:"Let's Encrypt",red:2,mim:'chase.com'}};
       } else {
         const data = await api(`/api/search/phishing?q=${encodeURIComponent(q)}`);
-        if (data) { S.phishResult = { raw: data.results, src: data.sources }; await refreshUsage(); }
+        if (data) { S.phishResult = parsePhishingResult(data); await refreshUsage(); }
       }
       S.phishLoading = false; render();
     }
